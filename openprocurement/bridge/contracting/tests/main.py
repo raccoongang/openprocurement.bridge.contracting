@@ -4,7 +4,7 @@ import unittest
 import json
 
 import exceptions
-from mock import patch, call, MagicMock
+from mock import patch, call, MagicMock, Mock
 from munch import munchify
 from datetime import datetime
 try:  # compatibility with requests-based or restkit-based op.client.python
@@ -13,10 +13,11 @@ except ImportError:
     from restkit.errors import ResourceGone
 # from time import sleep
 from openprocurement_client.client import ResourceNotFound
-from openprocurement.bridge.contracting.databridge import ContractingDataBridge
+from openprocurement.bridge.contracting.databridge import ContractingDataBridge, journal_context
 from openprocurement.bridge.contracting.journal_msg_ids import (
-    DATABRIDGE_INFO, DATABRIDGE_START
-)
+    DATABRIDGE_INFO, DATABRIDGE_START,
+    DATABRIDGE_EXCEPTION, DATABRIDGE_COPY_CONTRACT_ITEMS, DATABRIDGE_AWARD_NOT_FOUND, DATABRIDGE_COPY_CONTRACT_VALUE,
+    DATABRIDGE_COPY_CONTRACT_SUPPLIERS)
 
 
 class TestDatabridge(unittest.TestCase):
@@ -358,57 +359,194 @@ class TestDatabridge(unittest.TestCase):
 
         mocked_logger.exception.assert_called_once_with(e)
 
-
-    @patch('openprocurement.bridge.contracting.databridge.gevent')
+    @patch('openprocurement.bridge.contracting.databridge.gevent', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.Db', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.TendersClientSync', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.TendersClient', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.ContractingClient', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.INFINITY_LOOP', Mock())
     @patch('openprocurement.bridge.contracting.databridge.logger')
-    @patch('openprocurement.bridge.contracting.databridge.Db')
-    @patch(
-        'openprocurement.bridge.contracting.databridge.TendersClientSync')
-    @patch('openprocurement.bridge.contracting.databridge.TendersClient')
-    @patch(
-        'openprocurement.bridge.contracting.databridge.ContractingClient')
-    @patch('openprocurement.bridge.contracting.databridge.INFINITY_LOOP')
-    def test_sync_single_tender(
-            self, mocked_loop, mocked_contract_client, mocked_tender_client,
-            mocked_sync_client, mocked_db, mocked_logger, mocked_gevent):
+    def test_sync_single_tender_contract_skip(self, mocked_logger):
         cb = ContractingDataBridge({'main': {}})
         tender_id = 33
-        cb.tenders_sync_client.get_tender = MagicMock(
-            return_value={'data': {'contracts': [munchify({'status': 'no_active', 'id': 1})],
-                                   'id': 2, 'status': 'active', 'procuringEntity': 'procuringEntity',
-                                   'owner': 'owner', 'tender_token': 'tender_token'}})
+        tender_credentials_data = {'procuringEntity': 'procuringEntity', 'tender_token': 'tender_token'}
+        contract_data = {'status': 'no_active', 'id': 1}
+        tender_data = {
+            'id': 2, 'status': 'active', 'procuringEntity': 'procuringEntity',
+            'owner': 'owner', 'tender_token': 'tender_token',
+            'contracts': [munchify(contract_data)]}
+
+        cb.tenders_sync_client.get_tender = MagicMock(return_value={'data': tender_data})
+        cb.contracting_client.get_contract = MagicMock(side_effect=ResourceNotFound)
+        cb.contracting_client.create_contract = MagicMock(return_value={'data': ['test1', 'test2']})
+        cb.get_tender_credentials = MagicMock(return_value={'data': tender_credentials_data})
 
         cb.sync_single_tender(tender_id)
 
         calls_logs = mocked_logger.info.call_args_list
+        self.assertEqual(self._get_calls_count(calls_logs, call("Getting tender {}".format(tender_id))), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call("Got tender 2 in status active")), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Getting tender 33 credentials')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Got tender 33 credentials')), 1)
         self.assertEqual(self._get_calls_count(calls_logs, call("Skip contract 1 in status no_active")), 1)
         self.assertEqual(self._get_calls_count(calls_logs, call("Tender 33 does not contain contracts to transfer")), 1)
 
-        cb.tenders_sync_client.get_tender = MagicMock(
-            return_value={'data': {'contracts': [munchify({'status': 'active', 'id': 1})],
-                                   'id': 2, 'status': 'active', 'procuringEntity': 'procuringEntity',
-                                   'owner': 'owner', 'tender_token': 'tender_token'}})
+        self.assertEqual(len(cb.contracting_client.create_contract.call_args_list), 0)
 
-        cb.get_tender_credentials = MagicMock(return_value={'data': {'procuringEntity': 'procuringEntity',
-                                                                     'tender_token': 'tender_token'}})
+    @patch('openprocurement.bridge.contracting.databridge.gevent', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.Db', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.TendersClientSync', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.TendersClient', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.ContractingClient', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.INFINITY_LOOP', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.logger')
+    def test_sync_single_tender(self, mocked_logger):
+        cb = ContractingDataBridge({'main': {}})
+        tender_id = 33
+        tender_credentials_data = {'procuringEntity': 'procuringEntity', 'tender_token': 'tender_token'}
+        value_data = {'amount': 1, 'currency': 'UAH', 'valueAddedTaxIncluded': True}
+        contract_data = {'status': 'active', 'id': 1,
+                         'value': munchify(value_data),
+                         'items': [munchify({})],
+                         'suppliers': [munchify({})]}
+        tender_data = {'id': 2, 'status': 'active', 'procuringEntity': 'procuringEntity',
+                       'owner': 'owner', 'tender_token': 'tender_token',
+                       'contracts': [munchify(contract_data)]}
 
+        cb.tenders_sync_client.get_tender = MagicMock(return_value={'data': tender_data})
         cb.contracting_client.get_contract = MagicMock(side_effect=ResourceNotFound)
         cb.contracting_client.create_contract = MagicMock(return_value={'data': ['test1', 'test2']})
+        cb.get_tender_credentials = MagicMock(return_value={'data': tender_credentials_data})
+
         cb.sync_single_tender(tender_id)
 
         calls_logs = mocked_logger.info.call_args_list
 
-        self.assertEqual(self._get_calls_count(calls_logs, call("Getting tender {}".format(tender_id))), 2)
-        self.assertEqual(self._get_calls_count(calls_logs, call("Got tender 2 in status active")), 2)
-        self.assertEqual(self._get_calls_count(calls_logs, call('Getting tender 33 credentials')), 2)
-        self.assertEqual(self._get_calls_count(calls_logs, call('Got tender 33 credentials')), 2)
-        self.assertEqual(self._get_calls_count(calls_logs, call("Checking if contract 1 already exists")), 1)
-        self.assertEqual(
-            self._get_calls_count(calls_logs, call('Contract 1 does not exists. Prepare contract for creation.')), 1)
+        extra = journal_context({'MESSAGE_ID': DATABRIDGE_EXCEPTION}, {'CONTRACT_ID': 1, 'TENDER_ID': 2})
+
+        self.assertEqual(self._get_calls_count(calls_logs, call('Getting tender {}'.format(tender_id))), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Got tender 2 in status active')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Getting tender 33 credentials')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Got tender 33 credentials')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Checking if contract 1 already exists')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Contract 1 does not exists. '
+                                                                'Prepare contract for creation.')), 1)
         self.assertEqual(self._get_calls_count(calls_logs, call('Extending contract 1 with extra data')), 1)
         self.assertEqual(self._get_calls_count(calls_logs, call('Creating contract 1')), 1)
         self.assertEqual(self._get_calls_count(calls_logs, call('Contract 1 created')), 1)
         self.assertEqual(self._get_calls_count(calls_logs, call('Successfully transfered contracts: [1]')), 1)
+
+        create_args, create_kwargs = cb.contracting_client.create_contract.call_args
+        self.assertEqual(create_args[0]['data']['id'], contract_data['id'])
+        self.assertEqual(create_args[0]['data']['status'], tender_data['status'])
+        self.assertEqual(create_args[0]['data']['value'], value_data)
+
+    @patch('openprocurement.bridge.contracting.databridge.gevent', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.Db', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.TendersClientSync', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.TendersClient', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.ContractingClient', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.logger')
+    def test_sync_single_tender_without_extra_data_and_awards(self, mocked_logger):
+        cb = ContractingDataBridge({'main': {}})
+        tender_id = 33
+        tender_credentials_data = {'procuringEntity': 'procuringEntity', 'tender_token': 'tender_token'}
+        contract_data = {'status': 'active', 'id': 1}
+        tender_data = {'id': 2, 'status': 'active', 'procuringEntity': 'procuringEntity',
+                       'owner': 'owner', 'tender_token': 'tender_token',
+                       'contracts': [munchify(contract_data)],
+                       'items': [munchify({})],
+                       'suppliers': [munchify({})]}
+
+        cb.tenders_sync_client.get_tender = MagicMock(return_value={'data': tender_data})
+        cb.contracting_client.get_contract = MagicMock(side_effect=ResourceNotFound)
+        cb.contracting_client.create_contract = MagicMock(return_value={'data': ['test1', 'test2']})
+        cb.get_tender_credentials = MagicMock(return_value={'data': tender_credentials_data})
+
+        cb.sync_single_tender(tender_id)
+
+        calls_logs = mocked_logger.info.call_args_list + mocked_logger.warn.call_args_list
+
+        extra = journal_context({'MESSAGE_ID': DATABRIDGE_AWARD_NOT_FOUND}, {'CONTRACT_ID': 1, 'TENDER_ID': 2})
+
+        self.assertEqual(self._get_calls_count(calls_logs, call('Getting tender {}'.format(tender_id))), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Got tender 2 in status active')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Getting tender 33 credentials')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Got tender 33 credentials')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('No suppliers found with related award '
+                                                                'for contract 1.', extra=extra)), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('No value found with related award '
+                                                                'for contract 1.', extra=extra)), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Creating contract 1')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Contract 1 created')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Successfully transfered contracts: [1]')), 1)
+
+        create_args, create_kwargs = cb.contracting_client.create_contract.call_args
+        self.assertEqual(create_args[0]['data']['id'], contract_data['id'])
+        self.assertEqual(create_args[0]['data']['status'], tender_data['status'])
+        self.assertNotIn('value', create_args[0]['data'])
+
+    @patch('openprocurement.bridge.contracting.databridge.gevent', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.Db', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.TendersClientSync', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.TendersClient', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.ContractingClient', Mock())
+    @patch('openprocurement.bridge.contracting.databridge.logger')
+    def test_sync_single_tender_without_extra_data(self, mocked_logger):
+        cb = ContractingDataBridge({'main': {}})
+        tender_id = 33
+        tender_credentials_data = {'procuringEntity': 'procuringEntity', 'tender_token': 'tender_token'}
+        value_data = {'amount': 1, 'currency': 'UAH', 'valueAddedTaxIncluded': True}
+        supplier_data = {'id': 3}
+        item_data = {'id': 4}
+        award_data = {'status': 'active', 'id': 1,
+                      'value': munchify(value_data),
+                      'suppliers': [munchify(supplier_data)]}
+        contract_data = {'status': 'active', 'id': 2, 'awardId': 1}
+        tender_data = {'id': 2, 'status': 'active', 'procuringEntity': 'procuringEntity',
+                       'owner': 'owner', 'tender_token': 'tender_token',
+                       'contracts': [munchify(contract_data)],
+                       'awards': [munchify(award_data)],
+                       'items': [munchify(item_data)]}
+
+        cb.tenders_sync_client.get_tender = MagicMock(return_value={'data': tender_data})
+        cb.contracting_client.get_contract = MagicMock(side_effect=ResourceNotFound)
+        cb.contracting_client.create_contract = MagicMock(return_value={'data': ['test1', 'test2']})
+        cb.get_tender_credentials = MagicMock(return_value={'data': tender_credentials_data})
+
+        cb.sync_single_tender(tender_id)
+
+        calls_logs = mocked_logger.info.call_args_list + mocked_logger.warn.call_args_list
+
+        extra_params = {'CONTRACT_ID': 2, 'TENDER_ID': 2}
+        extra_items = journal_context({'MESSAGE_ID': DATABRIDGE_COPY_CONTRACT_ITEMS}, extra_params)
+        extra_suppliers = journal_context({'MESSAGE_ID': DATABRIDGE_COPY_CONTRACT_SUPPLIERS}, extra_params)
+        extra_value = journal_context({'MESSAGE_ID': DATABRIDGE_COPY_CONTRACT_VALUE}, extra_params)
+
+        self.assertEqual(self._get_calls_count(calls_logs, call('Getting tender {}'.format(tender_id))), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Got tender 2 in status active')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Getting tender 33 credentials')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Got tender 33 credentials')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Checking if contract 2 already exists')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Contract 2 does not exists. '
+                                                                'Prepare contract for creation.')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Extending contract 2 with extra data')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Copying all tender 2 items into '
+                                                                'contract 2', extra=extra_items)), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Contract 2 does not have value. Extending '
+                                                                'with award data.', extra=extra_value)), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Contract 2 does not have suppliers. Extending '
+                                                                'with award data.', extra=extra_suppliers)), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Creating contract 2')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Contract 2 created')), 1)
+        self.assertEqual(self._get_calls_count(calls_logs, call('Successfully transfered contracts: [2]')), 1)
+
+        create_args, create_kwargs = cb.contracting_client.create_contract.call_args
+        self.assertEqual(create_args[0]['data']['id'], contract_data['id'])
+        self.assertEqual(create_args[0]['data']['status'], tender_data['status'])
+        self.assertEqual(create_args[0]['data']['value'], value_data)
+        self.assertEqual(create_args[0]['data']['suppliers'], [supplier_data])
+        self.assertEqual(create_args[0]['data']['items'], [item_data])
 
     @patch('openprocurement.bridge.contracting.databridge.gevent')
     @patch('openprocurement.bridge.contracting.databridge.logger')
@@ -442,7 +580,6 @@ class TestDatabridge(unittest.TestCase):
         with self.assertRaises(Exception) as e:
             cb.sync_single_tender(tender_id)
         mocked_logger.exception.assert_called_once_with(e.exception)
-
 
     @patch('openprocurement.bridge.contracting.databridge.Db')
     @patch('openprocurement.bridge.contracting.databridge.TendersClientSync')
