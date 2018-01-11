@@ -1,5 +1,4 @@
 from gevent import monkey
-
 monkey.patch_all()
 
 try:
@@ -14,6 +13,7 @@ import os
 import argparse
 
 from retrying import retry
+from uuid import uuid4
 
 import gevent
 from gevent.queue import Queue
@@ -25,7 +25,6 @@ from openprocurement_client.client import TendersClientSync, TendersClient
 from openprocurement_client.contract import ContractingClient
 from openprocurement_client.client import ResourceNotFound
 from yaml import load
-from openprocurement.bridge.contracting.utils import journal_context, generate_req_id
 from openprocurement.bridge.contracting.journal_msg_ids import (
     DATABRIDGE_RESTART, DATABRIDGE_GET_CREDENTIALS, DATABRIDGE_GOT_CREDENTIALS,
     DATABRIDGE_FOUND_MULTILOT_COMPLETE, DATABRIDGE_FOUND_NOLOT_COMPLETE,
@@ -73,6 +72,7 @@ class Db(object):
             self.set_value = self.db.put
             self.has_value = self.db.has
 
+
     def get(self, key):
         return self.db.get(key)
 
@@ -81,6 +81,20 @@ class Db(object):
 
     def has(self, key):
         return self.has_value(key)
+
+
+def generate_req_id():
+    return b'contracting-data-bridge-req-' + str(uuid4()).encode('ascii')
+
+
+def journal_context(record=None, params=None):
+    if record is None:
+        record = {}
+    if params is None:
+        params = {}
+    for k, v in params.items():
+        record["JOURNAL_" + k] = v
+    return record
 
 
 class ContractingDataBridge(object):
