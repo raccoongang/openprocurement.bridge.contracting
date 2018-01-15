@@ -86,7 +86,11 @@ def generate_req_id():
     return b'contracting-data-bridge-req-' + str(uuid4()).encode('ascii')
 
 
-def journal_context(record={}, params={}):
+def journal_context(record=None, params=None):
+    if record is None:
+        record = {}
+    if params is None:
+        params = {}
     for k, v in params.items():
         record["JOURNAL_" + k] = v
     return record
@@ -110,7 +114,7 @@ class ContractingDataBridge(object):
                                                                                           self.cache_db._db_name,
                                                                                           self.cache_db._host,
                                                                                           self.cache_db._port),
-                    extra=journal_context({"MESSAGE_ID": DATABRIDGE_INFO}, {}))
+                    extra=journal_context({"MESSAGE_ID": DATABRIDGE_INFO}))
 
 
         self.on_error_delay = self.config_get('on_error_sleep_delay') or 5
@@ -138,7 +142,7 @@ class ContractingDataBridge(object):
         self.basket = {}
 
     def contracting_client_init(self):
-        logger.info('Initialization contracting clients.',  extra=journal_context({"MESSAGE_ID": DATABRIDGE_INFO}, {}))
+        logger.info('Initialization contracting clients.',  extra=journal_context({"MESSAGE_ID": DATABRIDGE_INFO}))
         self.contracting_client = ContractingClient(
             self.config_get('api_token'),
             host_url=self.contracting_api_server, api_version=self.contracting_api_version
@@ -345,7 +349,7 @@ class ContractingDataBridge(object):
             try:
                 self._get_tender_contracts()
             except Exception, e:
-                logger.warn("Fail to handle tender contracts", extra=journal_context({"MESSAGE_ID": DATABRIDGE_EXCEPTION}, {}))
+                logger.warn("Fail to handle tender contracts", extra=journal_context({"MESSAGE_ID": DATABRIDGE_EXCEPTION}))
                 logger.exception(e)
                 gevent.sleep(self.on_error_delay)
                 raise
@@ -486,11 +490,11 @@ class ContractingDataBridge(object):
                 self.tenders_queue.put(tender_data)
         except Exception, e:
             # TODO reset queues and restart sync
-            logger.warn('Forward worker died!', extra=journal_context({"MESSAGE_ID": DATABRIDGE_WORKER_DIED}, {}))
+            logger.warn('Forward worker died!', extra=journal_context({"MESSAGE_ID": DATABRIDGE_WORKER_DIED}))
             logger.exception(e)
             raise
         else:
-            logger.warn('Forward data sync finished!', extra=journal_context({"MESSAGE_ID": DATABRIDGE_WORKER_DIED}, {}))  # Should never happen!!!
+            logger.warn('Forward data sync finished!', extra=journal_context({"MESSAGE_ID": DATABRIDGE_WORKER_DIED}))  # Should never happen!!!
 
     def get_tender_contracts_backward(self):
         logger.info('Start backward data sync worker...')
@@ -507,7 +511,7 @@ class ContractingDataBridge(object):
                 self.tenders_queue.put(tender_data)
         except Exception, e:
             # TODO reset queues and restart sync
-            logger.warn('Backward worker died!', extra=journal_context({"MESSAGE_ID": DATABRIDGE_WORKER_DIED}, {}))
+            logger.warn('Backward worker died!', extra=journal_context({"MESSAGE_ID": DATABRIDGE_WORKER_DIED}))
             logger.exception(e)
             raise
         else:
@@ -567,7 +571,7 @@ class ContractingDataBridge(object):
                      gevent.spawn(self.get_tender_contracts_forward)]
 
     def _restart_synchronization_workers(self):
-        logger.warn("Restarting synchronization", extra=journal_context({"MESSAGE_ID": DATABRIDGE_RESTART}, {}))
+        logger.warn("Restarting synchronization", extra=journal_context({"MESSAGE_ID": DATABRIDGE_RESTART}))
         for j in self.jobs:
             j.kill()
         self.clients_initialize()
@@ -581,7 +585,7 @@ class ContractingDataBridge(object):
                               'retry_put_contracts': gevent.spawn(self.retry_put_contracts)}
 
     def run(self):
-        logger.info('Start Contracting Data Bridge', extra=journal_context({"MESSAGE_ID": DATABRIDGE_START}, {}))
+        logger.info('Start Contracting Data Bridge', extra=journal_context({"MESSAGE_ID": DATABRIDGE_START}))
         self._start_contract_sculptors()
         self._start_synchronization_workers()
         backward_worker, forward_worker = self.jobs
